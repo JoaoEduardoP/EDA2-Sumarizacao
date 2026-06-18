@@ -14,7 +14,7 @@ def export_to_markdown(result: Dict, output_file: str = "resumo.md"):
         f.write(f"| Total de frases | {result['metadados']['total_frases']} |\n")
         f.write(f"| Frases no resumo | {result['metadados']['frases_no_resumo']} |\n")
         f.write(f"| Método de similaridade | {result['metadados']['metodo_similaridade']} |\n")
-        f.write(f"| Threshold | {result['metadados']['threshold']} |\n")
+        f.write(f"| Threshold | {result['metadados']['threshold_usado']} |\n")
         f.write(f"| Vértices no grafo | {result['metadados']['grafo']['vertices']} |\n")
         f.write(f"| Arestas no grafo | {result['metadados']['grafo']['arestas']} |\n\n")
         
@@ -81,6 +81,6 @@ def export_to_html(result: Dict, output_file: str = "resumo.html"):
             total_frases=result['metadados']['total_frases'],
             frases_resumo=result['metadados']['frases_no_resumo'],
             metodo=result['metadados']['metodo_similaridade'],
-            threshold=result['metadados']['threshold'],
+            threshold=result['metadados']['threshold_usado'],
             sentences_html=sentences_html
         ))

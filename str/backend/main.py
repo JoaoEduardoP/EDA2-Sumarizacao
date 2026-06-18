@@ -43,7 +43,7 @@ def print_result(result: dict, verbose: bool = False):
     print(f"  Frases no artigo  : {meta['total_frases']}")
     print(f"  Frases no resumo  : {meta['frases_no_resumo']}")
     print(f"  Método            : {meta['metodo_similaridade'].upper()}")
-    print(f"  Threshold         : {meta['threshold']}")
+    print(f"  Threshold         : {meta['threshold_usado']}")
     g = meta["grafo"]
     print(f"  Grafo             : {g['vertices']} vértices | {g['arestas']} arestas")
     print(f"  Grau médio        : {g['grau_medio']:.2f} | Grau máx: {g['grau_max']}")
@@ -124,7 +124,7 @@ def main():
             text = list(SAMPLE_TEXTS.values())[0]
     else:
         print("Nenhum título fornecido — usando artigo de exemplo (offline).")
-        text = SAMPLE_TEXTS["inteligencia_artificial"]
+        text = list(SAMPLE_TEXTS.values())[0]
 
     summarizer = WikiSummarizer(
         lang=args.lang,

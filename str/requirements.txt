@@ -1,6 +1,9 @@
 # WikiSummarizer — dependências do projeto
 # Instale com: pip install -r requirements.txt
 
+# Interface web
+streamlit>=1.35.0
+
 # Processamento de linguagem natural
 spacy>=3.7.0
 
@@ -13,7 +16,6 @@ wikipedia-api>=0.6.0
 # Visualização do grafo
 matplotlib>=3.8.0
 
-# Opcional: modelo PT treinado do spaCy (lematização completa)
 # Após instalar spacy, execute:
 #   python -m spacy download pt_core_news_sm
 #   python -m spacy download en_core_web_sm
