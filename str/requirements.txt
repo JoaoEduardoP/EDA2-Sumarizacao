@@ -7,6 +7,10 @@ streamlit>=1.35.0
 # Processamento de linguagem natural
 spacy>=3.7.0
 
+# Embeddings semânticos (modelo baixado automaticamente na 1ª execução)
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+
 # Grafos (usado apenas para visualização/debug)
 networkx>=3.2.0
 
