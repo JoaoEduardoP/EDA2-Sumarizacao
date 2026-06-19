@@ -93,10 +93,10 @@ def buscar_artigo(titulo: str, lang: str) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def sumarizar(texto: str, n_frases: int, lang: str) -> dict:
+def sumarizar(texto: str, n_frases: int, lang: str, metodo: str) -> dict:
     summarizer = WikiSummarizer(
         lang=lang,
-        similarity_method="jaccard",
+        similarity_method=metodo,
         similarity_threshold=0.1,
         damping=0.85,
     )
@@ -183,6 +183,22 @@ with st.sidebar:
 
     lang = st.selectbox("Idioma da busca", ["pt", "en"], index=0)
 
+    metodo = st.radio(
+        "Método de similaridade",
+        ["embeddings", "jaccard", "tfidf"],
+        index=0,
+        format_func=lambda m: {
+            "embeddings": "Embeddings semânticos (recomendado)",
+            "jaccard": "Jaccard (palavras comuns)",
+            "tfidf": "TF-IDF + Cosseno",
+        }[m],
+    )
+    if metodo == "embeddings":
+        st.caption(
+            "Usa o modelo `paraphrase-multilingual-MiniLM-L12-v2` (~120 MB). "
+            "Baixado automaticamente na primeira execução."
+        )
+
     st.divider()
 
     mostrar_grafo = st.checkbox("Exibir visualização do grafo", value=False)
@@ -211,7 +227,7 @@ with col_exemplo:
         entrada = ARTIGOS_EXEMPLO[exemplo]
 
 st.markdown("")
-rodar = st.button("Gerar resumo", type="primary", use_container_width=True)
+rodar = st.button("Gerar resumo", type="primary", use_container_width=True)  # noqa: deprecated in future
 
 # ─────────────────────────────────────────────
 # PROCESSAMENTO
@@ -242,8 +258,13 @@ if rodar and entrada.strip():
 
     n_frases = NIVEIS[nivel_escolhido]["frases"]
 
-    with st.spinner("Construindo grafo e executando PageRank..."):
-        result = sumarizar(texto, n_frases, lang_uso)
+    spinner_msg = (
+        "Gerando embeddings e construindo grafo..."
+        if metodo == "embeddings"
+        else "Construindo grafo e executando PageRank..."
+    )
+    with st.spinner(spinner_msg):
+        result = sumarizar(texto, n_frases, lang_uso, metodo)
 
     if "erro" in result:
         st.error(result["erro"])
@@ -308,7 +329,7 @@ if rodar and entrada.strip():
             sentences_all = []
 
         img_bytes = gerar_imagem_grafo(result, sentences_all)
-        st.image(img_bytes, use_container_width=True)
+        st.image(img_bytes, width="stretch")
 
     # ─────────────────────────────────────────────
     # RESULTADO — DETALHES TÉCNICOS

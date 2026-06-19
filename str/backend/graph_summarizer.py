@@ -271,7 +271,7 @@ class WikiSummarizer:
     def __init__(
         self,
         lang: str = "pt",
-        similarity_method: str = "jaccard",   # "jaccard" | "tfidf"
+        similarity_method: str = "embeddings",  # "jaccard" | "tfidf" | "embeddings"
         similarity_threshold: float = 0.1,
         damping: float = 0.85,
     ):
@@ -352,37 +352,54 @@ class WikiSummarizer:
         # PASSO 3: Threshold adaptativo (se solicitado)
         # ═══════════════════════════════════════════════════════════════
         original_threshold = self.threshold
-        
-        if auto_threshold and self.similarity_method == "jaccard" and total > 5:
-            print("[3/6] Calculando threshold adaptativo...")
-            
-            # Coleta amostra de similaridades (limitada para performance)
-            sample_sims = []
-            sample_limit = min(50, total)  # Amostra dos primeiros 50 ou menos
-            
-            for i in range(min(sample_limit, total)):
-                for j in range(i + 1, min(sample_limit, total)):
-                    sim = jaccard_similarity(token_sets[i], token_sets[j])
-                    if sim > 0:  # Ignora zeros
-                        sample_sims.append(sim)
-            
-            if sample_sims:
-                mean_sim = sum(sample_sims) / len(sample_sims)
-                # Calcula desvio padrão
-                variance = sum((s - mean_sim) ** 2 for s in sample_sims) / len(sample_sims)
-                std_sim = variance ** 0.5
-                
-                # Threshold = média + 0.3 * desvio (ajustável)
-                auto_threshold_value = mean_sim + 0.3 * std_sim
-                
-                # Limita entre 0.05 e 0.5 para evitar extremos
-                auto_threshold_value = max(0.05, min(0.5, auto_threshold_value))
-                
+
+        # ── Embeddings: geração antecipada (necessária antes do threshold) ──
+        sim_matrix = None
+        if self.similarity_method == "embeddings":
+            print("[3/6] Gerando embeddings semânticos...")
+            from embedder import get_embeddings, cosine_similarity_matrix
+            embeddings = get_embeddings(sentences)
+            sim_matrix = cosine_similarity_matrix(embeddings)
+            print(f"      ✓ Embeddings gerados: {embeddings.shape}")
+
+            if auto_threshold and total > 5:
+                # Threshold adaptativo para coseno: média + 0.5 * desvio
+                # (coseno tem escala diferente do Jaccard: [0, 1] com média ~0.4)
+                import numpy as _np
+                upper = sim_matrix[_np.triu_indices(total, k=1)]
+                mean_sim = float(_np.mean(upper))
+                std_sim = float(_np.std(upper))
+                auto_threshold_value = mean_sim + 0.5 * std_sim
+                auto_threshold_value = max(0.2, min(0.85, auto_threshold_value))
                 print(f"      ✓ Média das similaridades: {mean_sim:.4f}")
                 print(f"      ✓ Desvio padrão: {std_sim:.4f}")
                 print(f"      ✓ Threshold original: {self.threshold}")
                 print(f"      ✓ Threshold automático: {auto_threshold_value:.4f}")
-                
+                self.threshold = auto_threshold_value
+            else:
+                print(f"      ✓ Threshold fixo: {self.threshold}")
+
+        elif auto_threshold and self.similarity_method == "jaccard" and total > 5:
+            print("[3/6] Calculando threshold adaptativo...")
+
+            sample_sims = []
+            sample_limit = min(50, total)
+            for i in range(sample_limit):
+                for j in range(i + 1, sample_limit):
+                    sim = jaccard_similarity(token_sets[i], token_sets[j])
+                    if sim > 0:
+                        sample_sims.append(sim)
+
+            if sample_sims:
+                mean_sim = sum(sample_sims) / len(sample_sims)
+                variance = sum((s - mean_sim) ** 2 for s in sample_sims) / len(sample_sims)
+                std_sim = variance ** 0.5
+                auto_threshold_value = mean_sim + 0.3 * std_sim
+                auto_threshold_value = max(0.05, min(0.5, auto_threshold_value))
+                print(f"      ✓ Média das similaridades: {mean_sim:.4f}")
+                print(f"      ✓ Desvio padrão: {std_sim:.4f}")
+                print(f"      ✓ Threshold original: {self.threshold}")
+                print(f"      ✓ Threshold automático: {auto_threshold_value:.4f}")
                 self.threshold = auto_threshold_value
             else:
                 print(f"      ⚠ Sem amostras válidas, mantendo threshold: {self.threshold}")
@@ -397,7 +414,16 @@ class WikiSummarizer:
         similarity_comparisons = 0
         edges_added = 0
 
-        if self.similarity_method == "tfidf":
+        if self.similarity_method == "embeddings":
+            # sim_matrix já calculada no passo 3
+            for i in range(total):
+                for j in range(i + 1, total):
+                    similarity_comparisons += 1
+                    sim = float(sim_matrix[i, j])
+                    if sim >= self.threshold:
+                        graph.add_edge(i, j, sim)
+                        edges_added += 1
+        elif self.similarity_method == "tfidf":
             tfidf_vecs = compute_tfidf(sentences, self.preprocessor)
             for i in range(total):
                 for j in range(i + 1, total):
@@ -406,7 +432,7 @@ class WikiSummarizer:
                     if sim >= self.threshold:
                         graph.add_edge(i, j, sim)
                         edges_added += 1
-        else:  # jaccard (padrão)
+        else:  # jaccard
             for i in range(total):
                 for j in range(i + 1, total):
                     similarity_comparisons += 1
