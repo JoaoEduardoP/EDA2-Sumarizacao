@@ -6,14 +6,16 @@ Estruturas de dados principais do projeto:
   Grafo:           Vértice = frase | Aresta = similaridade Jaccard
   Hash table:      frequência de tokens por frase (dict Python)
   Fila de prioridade: heapq para selecionar top-k frases pelo PageRank
-  
+
 Algoritmo:
   1. Tokenizar cada frase → conjunto de tokens lematizados
   2. Calcular similaridade Jaccard entre todos os pares de frases
   3. Adicionar aresta se similaridade > threshold
   4. Rodar PageRank (implementado do zero) sobre o grafo
-  5. Usar heapq (fila de prioridade máxima) para selecionar as N frases
-     com maior score → resumo final
+  5. Usar heapq (fila de prioridade máxima) para obter um pool de frases
+     candidatas com maior score
+  6. Remover frases redundantes do pool (greedy, baseado em Jaccard) e
+     selecionar as N frases finais → resumo final
 """
 
 import time
@@ -178,15 +180,20 @@ def pagerank(
 ) -> Dict[int, float]:
     """
     PageRank adaptado para grafos de frases (TextRank).
-    
-    Fórmula clássica:
-      PR(v) = (1 - d) / N  +  d × Σ [ PR(u) × w(u,v) / Σ_k w(u,k) ]
-    
+
+    Fórmula clássica (com tratamento de dangling nodes):
+      PR(v) = (1 - d) / N  +  d × [ Σ PR(u)·w(u,v)/Σ_k w(u,k)  +  dangling_mass / N ]
+
     onde:
-      d       = fator de amortecimento (damping)
-      N       = total de vértices
-      w(u,v)  = peso da aresta u→v
-    
+      d              = fator de amortecimento (damping)
+      N              = total de vértices
+      w(u,v)         = peso da aresta u→v
+      dangling_mass  = soma do PR de vértices SEM arestas de saída
+                       (redistribuída uniformemente para conservar a massa
+                       total de rank; sem isso, vértices sem vizinhos
+                       "vazam" probabilidade do sistema a cada iteração,
+                       distorcendo os scores de todos os outros nós)
+
     Parâmetros:
       damping  : probabilidade de seguir uma aresta (default 0.85)
       max_iter : máximo de iterações
@@ -199,8 +206,19 @@ def pagerank(
     # Inicializa scores uniformemente
     scores: Dict[int, float] = {i: 1.0 / n for i in range(n)}
 
+    # Vértices sem arestas de saída (dangling nodes). A estrutura do grafo
+    # não muda entre iterações, então essa lista é calculada uma única vez
+    # fora do loop principal.
+    dangling_nodes = [i for i in range(n) if graph.out_weight_sum(i) == 0]
+
     for iteration in range(max_iter):
         new_scores: Dict[int, float] = {}
+
+        # Massa de rank presa em dangling nodes nesta iteração, redistribuída
+        # igualmente entre todos os vértices (tratamento padrão de dangling
+        # nodes em PageRank).
+        dangling_mass = sum(scores[i] for i in dangling_nodes)
+        dangling_contribution = dangling_mass / n
 
         for v in range(n):
             rank_sum = 0.0
@@ -209,6 +227,9 @@ def pagerank(
                 total_weight = graph.out_weight_sum(u)
                 if total_weight > 0:
                     rank_sum += scores[u] * (weight / total_weight)
+
+            # Redistribui a massa dos dangling nodes para v
+            rank_sum += dangling_contribution
 
             new_scores[v] = (1 - damping) / n + damping * rank_sum
 
@@ -256,6 +277,74 @@ def top_k_sentences(
 
 
 # ═══════════════════════════════════════════════════════════════
+# REMOÇÃO DE REDUNDÂNCIA
+# ═══════════════════════════════════════════════════════════════
+
+def remove_redundant(
+    candidates: List[Tuple[float, int, str]],
+    token_sets: List[Set[str]],
+    n_sentences: int,
+    redundancy_threshold: float = 0.75,
+) -> Tuple[List[Tuple[float, int, str]], int]:
+    """
+    Filtra frases redundantes de um conjunto de candidatas já ranqueadas.
+
+    Estratégia gulosa (greedy): percorre as candidatas em ordem decrescente
+    de score PageRank e só aceita uma frase no resumo se ela NÃO for muito
+    parecida (Jaccard > redundancy_threshold) com nenhuma frase já aceita.
+    Isso evita que o resumo final tenha duas frases dizendo essencialmente
+    a mesma coisa, mesmo que ambas tenham scores altos por estarem na
+    mesma "vizinhança" densa do grafo.
+
+    Args:
+        candidates:            Lista (score, índice, frase) já ordenada
+                                por score decrescente (pool maior que o
+                                tamanho final do resumo).
+        token_sets:            Conjuntos de tokens de cada frase (reaproveitados
+                                do pré-processamento, índice = índice da frase).
+        n_sentences:           Quantidade final de frases desejada no resumo.
+        redundancy_threshold:  Acima desse valor de Jaccard, a frase candidata
+                                é considerada redundante e descartada.
+
+    Returns:
+        (frases_selecionadas, quantidade_removida_por_redundancia)
+    """
+    selected: List[Tuple[float, int, str]] = []
+    selected_idx: List[int] = []
+    removed_count = 0
+
+    for score, idx, sentence in candidates:
+        if len(selected) >= n_sentences:
+            break
+
+        is_redundant = any(
+            jaccard_similarity(token_sets[idx], token_sets[sel_idx]) > redundancy_threshold
+            for sel_idx in selected_idx
+        )
+
+        if is_redundant:
+            removed_count += 1
+            continue
+
+        selected.append((score, idx, sentence))
+        selected_idx.append(idx)
+
+    # Fallback: se o filtro foi agressivo e a pool não foi suficiente para
+    # completar n_sentences, completa com as melhores frases restantes,
+    # ignorando o filtro de redundância (preferimos um resumo completo a
+    # um resumo curto demais).
+    if len(selected) < n_sentences:
+        for score, idx, sentence in candidates:
+            if len(selected) >= n_sentences:
+                break
+            if idx not in selected_idx:
+                selected.append((score, idx, sentence))
+                selected_idx.append(idx)
+
+    return selected, removed_count
+
+
+# ═══════════════════════════════════════════════════════════════
 # SUMARIZADOR PRINCIPAL
 # ═══════════════════════════════════════════════════════════════
 
@@ -274,11 +363,15 @@ class WikiSummarizer:
         similarity_method: str = "embeddings",  # "jaccard" | "tfidf" | "embeddings"
         similarity_threshold: float = 0.1,
         damping: float = 0.85,
+        redundancy_threshold: float = 0.75,
     ):
         self.preprocessor = TextPreprocessor(lang)
         self.similarity_method = similarity_method
         self.threshold = similarity_threshold
         self.damping = damping
+        # Acima desse valor de Jaccard entre duas frases, a segunda é
+        # considerada redundante e não entra no resumo (ver remove_redundant).
+        self.redundancy_threshold = redundancy_threshold
 
     def visualize(self, result: Dict, output_file: str = "grafo.png"):
         """Visualiza o grafo da última sumarização."""
@@ -416,6 +509,20 @@ class WikiSummarizer:
 
         if self.similarity_method == "embeddings":
             # sim_matrix já calculada no passo 3
+            # Garantia: se por algum motivo sim_matrix for None, tenta recomputar.
+            if sim_matrix is None:
+                try:
+                    from embedder import get_embeddings, cosine_similarity_matrix
+                    import numpy as _np
+                    embeddings = get_embeddings(sentences)
+                    sim_matrix = cosine_similarity_matrix(embeddings)
+                    print("      ✓ Matriz de similaridade recomposta com sucesso")
+                except Exception as e:
+                    print(f"      ⚠ Não foi possível recomputar sim_matrix: {e}")
+                    # fallback: matriz zero (nenhuma similaridade)
+                    import numpy as _np
+                    sim_matrix = _np.zeros((total, total))
+
             for i in range(total):
                 for j in range(i + 1, total):
                     similarity_comparisons += 1
@@ -465,10 +572,27 @@ class WikiSummarizer:
         print(f"      ✓ Top scores: {[(idx, round(score, 6)) for idx, score in top_scores]}")
 
         # ═══════════════════════════════════════════════════════════════
-        # PASSO 6: Seleção das frases com fila de prioridade
+        # PASSO 6: Seleção das frases com fila de prioridade + remoção
+        #          de redundância
         # ═══════════════════════════════════════════════════════════════
         print("[6/6] Selecionando frases via fila de prioridade (max-heap)...")
-        top = top_k_sentences(scores, sentences, n_sentences)
+
+        # Pega um pool maior que n_sentences, pois a etapa de remoção de
+        # redundância pode descartar algumas candidatas e precisamos de
+        # margem para completar o resumo com frases ainda relevantes.
+        pool_size = min(total, max(n_sentences * 3, n_sentences + 10))
+        candidates_pool = top_k_sentences(scores, sentences, pool_size)
+
+        print(f"      ✓ Pool de candidatas: {pool_size} frases")
+        print("      → Aplicando remoção de redundância (Jaccard > "
+              f"{self.redundancy_threshold})...")
+        top, n_redundant_removed = remove_redundant(
+            candidates_pool,
+            token_sets,
+            n_sentences,
+            redundancy_threshold=self.redundancy_threshold,
+        )
+        print(f"      ✓ Frases redundantes descartadas: {n_redundant_removed}")
 
         if preserve_order:
             # Reordena pelo índice original para manter coesão
@@ -510,6 +634,8 @@ class WikiSummarizer:
                 "threshold_original": original_threshold,
                 "threshold_usado": self.threshold,
                 "threshold_automatico": auto_threshold,
+                "redundancy_threshold": self.redundancy_threshold,
+                "frases_redundantes_removidas": n_redundant_removed,
                 "grafo": stats,
                 "top_tokens": sorted(
                     global_freq.items(), key=lambda x: x[1], reverse=True
