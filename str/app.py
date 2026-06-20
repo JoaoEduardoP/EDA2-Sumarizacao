@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, "backend")
 
-from wiki_fetcher import get_wiki_article, SAMPLE_TEXTS
-from graph_summarizer import WikiSummarizer
+from backend.wiki_fetcher import get_wiki_article, SAMPLE_TEXTS
+from backend.graph_summarizer import WikiSummarizer
 
 # ─────────────────────────────────────────────
 # CONFIGURAÇÃO DA PÁGINA
@@ -60,6 +60,10 @@ ARTIGOS_EXEMPLO = {
     "Biomas do Brasil": "Biomas do Brasil",
 }
 
+# Opções do seletor customizado: URL + exemplos (separador é visual apenas no HTML)
+OPCOES_EXEMPLOS = list(ARTIGOS_EXEMPLO.keys())
+OPCOES_SELETOR = ["URL"] + OPCOES_EXEMPLOS
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -81,7 +85,9 @@ def extrair_titulo_da_url(url: str) -> str | None:
 def detectar_lang_da_url(url: str) -> str:
     """Detecta idioma pela URL (pt.wikipedia.org → 'pt')."""
     try:
-        host = urlparse(url).hostname  # pt.wikipedia.org
+        host = urlparse(url).hostname  # pt.wikipedia.org or None
+        if not host:
+            return "pt"
         return host.split(".")[0]
     except Exception:
         return "pt"
@@ -105,7 +111,7 @@ def sumarizar(texto: str, n_frases: int, lang: str, metodo: str) -> dict:
 
 def gerar_imagem_grafo(result: dict, sentences: list) -> bytes:
     """Gera a imagem do grafo e retorna como bytes PNG."""
-    from graph_summarizer import SentenceGraph, pagerank as _pr
+    from backend.graph_summarizer import SentenceGraph, pagerank as _pr
 
     # Reconstrói o grafo a partir dos metadados (já calculado)
     # Usa o grafo armazenado em cache via summarizer — recria para visualização
@@ -152,6 +158,21 @@ def gerar_imagem_grafo(result: dict, sentences: list) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
+
+# ─────────────────────────────────────────────
+# SESSION STATE — inicialização
+# ─────────────────────────────────────────────
+
+if "seletor_escolha" not in st.session_state:
+    st.session_state["seletor_escolha"] = "URL"
+
+if "url_travada" not in st.session_state:
+    st.session_state["url_travada"] = False
+
+# _entrada_widget é a key direta do text_input — escrevemos nela para forçar o valor
+if "_entrada_widget" not in st.session_state:
+    st.session_state["_entrada_widget"] = ""
 
 
 # ─────────────────────────────────────────────
@@ -212,37 +233,97 @@ with st.sidebar:
 # ÁREA PRINCIPAL — INPUT
 # ─────────────────────────────────────────────
 
+# Separador visual — item que, se selecionado, é ignorado e voltamos para "URL"
+SEPARADOR = "――――――――――――――――――――――"
+OPCOES_SELETOR_FULL = ["URL", SEPARADOR] + OPCOES_EXEMPLOS
+
+# CSS que desabilita visualmente o item do separador no <select> nativo do browser.
+# O Streamlit renderiza selectbox como um <select> HTML nativo, então nth-child funciona.
+# Índice 2 = segundo <option> = o separador (1-based no CSS).
+st.markdown("""
+<style>
+/* Torna o separador visualmente não-clicável dentro do selectbox nativo */
+[data-testid="stSelectbox"] select option:nth-child(2) {
+    color: #999;
+    font-size: 11px;
+    pointer-events: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
 col_input, col_exemplo = st.columns([3, 1])
 
-with col_input:
-    entrada = st.text_input(
-        "URL ou título do artigo",
-        placeholder="https://pt.wikipedia.org/wiki/Inteligência_artificial  ou  Grafos",
-    )
+
+def _ao_mudar_seletor():
+    escolha = st.session_state["_seletor_widget"]
+
+    # Se o usuário conseguiu selecionar o separador, volta para "URL"
+    if escolha == SEPARADOR:
+        st.session_state["_seletor_widget"] = "URL"
+        st.session_state["seletor_escolha"] = "URL"
+        st.session_state["url_travada"] = False
+        st.session_state["_entrada_widget"] = ""
+        return
+
+    st.session_state["seletor_escolha"] = escolha
+
+    if escolha == "URL":
+        st.session_state["url_travada"] = False
+        st.session_state["_entrada_widget"] = ""
+    else:
+        # Artigo de exemplo: escreve direto na key do text_input para forçar o valor
+        st.session_state["_entrada_widget"] = ARTIGOS_EXEMPLO[escolha]
+        st.session_state["url_travada"] = True
+
 
 with col_exemplo:
     st.markdown("<br>", unsafe_allow_html=True)
-    exemplo = st.selectbox("Carregar exemplo", ["—"] + list(ARTIGOS_EXEMPLO.keys()), label_visibility="collapsed")
-    if exemplo != "—":
-        entrada = ARTIGOS_EXEMPLO[exemplo]
+
+    # Índice atual no seletor — garante que o selectbox reflita a escolha persistida
+    idx_atual = OPCOES_SELETOR_FULL.index(st.session_state["seletor_escolha"])
+
+    st.selectbox(
+        "Carregar exemplo",
+        options=OPCOES_SELETOR_FULL,
+        index=idx_atual,
+        key="_seletor_widget",
+        on_change=_ao_mudar_seletor,
+        label_visibility="collapsed",
+    )
+
+with col_input:
+    # text_input usa a mesma key que escrevemos em _ao_mudar_seletor,
+    # então o Streamlit exibe o valor correto sem precisar de rerun extra.
+    st.text_input(
+        "URL ou título do artigo",
+        placeholder="https://pt.wikipedia.org/wiki/Inteligência_artificial  ou  Grafos",
+        disabled=st.session_state["url_travada"],
+        key="_entrada_widget",
+    )
+
+    if st.session_state["url_travada"]:
+        st.caption("🔒 Artigo de exemplo selecionado. Escolha **URL** no seletor para digitar livremente.")
+
+# Valor final: lê diretamente da key do widget
+entrada_final = st.session_state.get("_entrada_widget", "")
 
 st.markdown("")
-rodar = st.button("Gerar resumo", type="primary", use_container_width=True)  # noqa: deprecated in future
+rodar = st.button("Gerar resumo", type="primary", use_container_width=True)
 
 # ─────────────────────────────────────────────
 # PROCESSAMENTO
 # ─────────────────────────────────────────────
 
-if rodar and entrada.strip():
-    entrada = entrada.strip()
+if rodar and entrada_final.strip():
+    entrada_proc = entrada_final.strip()
 
     # Detecta se é URL ou título direto
-    if entrada.startswith("http"):
-        titulo = extrair_titulo_da_url(entrada)
-        lang_detectado = detectar_lang_da_url(entrada)
+    if entrada_proc.startswith("http"):
+        titulo = extrair_titulo_da_url(entrada_proc)
+        lang_detectado = detectar_lang_da_url(entrada_proc)
         lang_uso = lang_detectado
     else:
-        titulo = entrada
+        titulo = entrada_proc
         lang_uso = lang
 
     if not titulo:
@@ -322,7 +403,7 @@ if rodar and entrada.strip():
         st.caption("Nós marcados com ★ foram selecionados para o resumo.")
         sentences_all = []
         try:
-            from preprocessor import TextPreprocessor
+            from backend.preprocessor import TextPreprocessor
             prep = TextPreprocessor(lang_uso)
             sentences_all = prep.segment_sentences(texto)
         except Exception:
@@ -350,5 +431,5 @@ if rodar and entrada.strip():
             st.write(f"- Tokens únicos: `{perf.get('tokens_unicos', '?')}`")
             st.write(f"- Densidade do grafo: `{perf.get('densidade_grafo', '?')}`")
 
-elif rodar and not entrada.strip():
+elif rodar and not entrada_final.strip():
     st.warning("Digite uma URL ou título de artigo.")
