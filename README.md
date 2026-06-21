@@ -200,25 +200,25 @@ A **implementação dos algoritmos principais de grafos** (construção do grafo
     <td align="center">
       <a href="https://github.com/JoaoEduardoP">
         <img src="https://avatars.githubusercontent.com/JoaoEduardoP" width="100" height="100" style="border-radius:50%"/><br/>
-        <sub><b>Caio Rocha</b></sub>
+        <sub><b>Joao Eduardo</b></sub>
       </a>
     </td>
     <td align="center">
       <a href="https://github.com/audittmega">
         <img src="https://avatars.githubusercontent.com/audittmega" width="100" height="100" style="border-radius:50%"/><br/>
-        <sub><b>Eduardo Morais</b></sub>
+        <sub><b>Thiago Tonin</b></sub>
       </a>
     </td>
     <td align="center">
       <a href="https://github.com/TiagoBalieiro">
         <img src="https://avatars.githubusercontent.com/TiagoBalieiro" width="100" height="100" style="border-radius:50%"/><br/>
-        <sub><b>Fábio Torres</b></sub>
+        <sub><b>Tiago Balieiro</b></sub>
       </a>
     </td>
     <td align="center">
-      <a href="https://github.com/JoaoEduardoP">
-        <img src="https://avatars.githubusercontent.com/JoaoEduardoP" width="100" height="100" style="border-radius:50%"/><br/>
-        <sub><b>João Eduardo</b></sub>
+      <a href="https://github.com/leoramiroo">
+        <img src="https://avatars.githubusercontent.com/leoramiroo" width="100" height="100" style="border-radius:50%"/><br/>
+        <sub><b>Leonardo Ramiro</b></sub>
       </a>
     </td>
   </tr>
