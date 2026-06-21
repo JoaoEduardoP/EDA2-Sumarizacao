@@ -29,9 +29,12 @@ from preprocessor import TextPreprocessor
 from graph_summarizer import (
     jaccard_similarity,
     cosine_tfidf_similarity,
+    compute_adaptive_threshold,
+    compute_summary_sentence_count,
     compute_tfidf,
     SentenceGraph,
     pagerank,
+    select_sentences_mmr,
     top_k_sentences,
     WikiSummarizer,
 )
@@ -249,7 +252,47 @@ class TestTopKSentences(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 6. PRÉ-PROCESSADOR
+# 6. CONTROLES ADAPTATIVOS
+# ═══════════════════════════════════════════════════════════════
+
+class TestAdaptiveControls(unittest.TestCase):
+
+    def test_percentual_e_threshold_por_densidade(self):
+        self.assertEqual(compute_summary_sentence_count(10, n_sentences=5, summary_percent=25), 3)
+        self.assertEqual(compute_summary_sentence_count(4, summary_percent=1), 1)
+        self.assertEqual(compute_summary_sentence_count(4, summary_percent=100), 4)
+        info = compute_adaptive_threshold(
+            [0.90, 0.80, 0.20, 0.10], method="jaccard", strategy="auto_density", target_density=0.50
+        )
+        self.assertEqual(info["desired_edges"], 2)
+        self.assertAlmostEqual(info["threshold"], 0.80)
+
+    def test_pagerank_metadata_e_mmr(self):
+        g = SentenceGraph(3)
+        g.add_edge(0, 1, 0.5)
+        g.add_edge(1, 2, 0.5)
+        scores, meta = pagerank(g, return_metadata=True)
+        self.assertEqual(len(scores), 3)
+        self.assertIn("iteracoes", meta)
+        self.assertIn("delta_final", meta)
+        self.assertAlmostEqual(sum(scores.values()), 1.0, places=3)
+
+        candidates = [
+            (0.50, 0, "Grafos usam vértices e arestas."),
+            (0.49, 1, "Grafos também usam vértices e arestas."),
+            (0.30, 2, "PageRank mede importância de nós."),
+        ]
+        token_sets = [
+            {"grafo", "vertice", "aresta"},
+            {"grafo", "vertice", "aresta"},
+            {"pagerank", "importancia", "no"},
+        ]
+        selected = select_sentences_mmr(candidates, token_sets, 2, diversity_alpha=0.50)
+        self.assertEqual([item[1] for item in selected], [0, 2])
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7. PRÉ-PROCESSADOR
 # ═══════════════════════════════════════════════════════════════
 
 class TestPreprocessor(unittest.TestCase):
@@ -314,9 +357,24 @@ class TestWikiSummarizer(unittest.TestCase):
 
     def test_numero_de_frases_respeitado(self):
         """Resumo deve ter exatamente n_sentences frases selecionadas"""
-        s = WikiSummarizer(similarity_threshold=0.05)
+        s = WikiSummarizer(similarity_method="jaccard", similarity_threshold=0.05)
         resultado = s.summarize(self.TEXTO_TESTE, n_sentences=3)
         self.assertEqual(resultado["metadados"]["frases_no_resumo"], 3)
+
+    def test_percentual_e_grafo_serializado_no_pipeline(self):
+        s = WikiSummarizer(similarity_method="jaccard", similarity_threshold=0.05)
+        resultado = s.summarize(
+            self.TEXTO_TESTE,
+            summary_percent=40,
+            threshold_strategy="manual",
+            include_graph=True,
+        )
+        self.assertEqual(resultado["metadados"]["frases_no_resumo"], 2)
+        self.assertIn("grafo_serializado", resultado)
+        self.assertEqual(
+            len(resultado["grafo_serializado"]["arestas"]),
+            resultado["metadados"]["grafo"]["arestas"],
+        )
 
     def test_texto_vazio_retorna_erro(self):
         """Texto sem frases válidas deve retornar chave 'erro'"""
