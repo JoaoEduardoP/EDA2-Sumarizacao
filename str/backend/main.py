@@ -44,9 +44,16 @@ def print_result(result: dict, verbose: bool = False):
     print(f"  Frases no resumo  : {meta['frases_no_resumo']}")
     print(f"  Método            : {meta['metodo_similaridade'].upper()}")
     print(f"  Threshold         : {meta['threshold_usado']}")
+    if "threshold" in meta:
+        print(f"  Estratégia thr.   : {meta['threshold']['strategy']}")
     g = meta["grafo"]
     print(f"  Grafo             : {g['vertices']} vértices | {g['arestas']} arestas")
     print(f"  Grau médio        : {g['grau_medio']:.2f} | Grau máx: {g['grau_max']}")
+    if "densidade" in g:
+        print(f"  Densidade         : {g['densidade']} | Componentes: {g['componentes_conectados']}")
+    if "pagerank" in meta:
+        pr = meta["pagerank"]
+        print(f"  PageRank          : {pr['iteracoes']} iterações | convergiu={pr['convergiu']}")
 
     print(f"\n  🔑 Top 10 tokens mais frequentes:")
     tokens = meta["top_tokens"][:10]
@@ -101,9 +108,17 @@ def main():
     )
     parser.add_argument("--titulo",   type=str,  default=None,       help="Título do artigo Wikipedia")
     parser.add_argument("--lang",     type=str,  default="pt",       help="Idioma: pt | en")
-    parser.add_argument("--metodo",   type=str,  default="jaccard",  help="Similaridade: jaccard | tfidf")
+    parser.add_argument("--metodo",   type=str,  default="jaccard",  help="Similaridade: jaccard | tfidf | embeddings")
     parser.add_argument("--frases",   type=int,  default=5,          help="Nº de frases no resumo")
+    parser.add_argument("--percentual-resumo", type=float, default=None, help="Percentual de frases do texto original")
     parser.add_argument("--threshold",type=float,default=0.1,        help="Threshold de similaridade")
+    parser.add_argument("--threshold-strategy", type=str, default="auto_density", help="manual | mean_std | auto_density")
+    parser.add_argument("--target-density", type=float, default=0.12, help="Densidade-alvo do grafo em auto_density")
+    parser.add_argument("--selection-strategy", type=str, default="mmr", help="mmr | redundancy")
+    parser.add_argument("--alpha", type=float, default=0.85, help="Peso do PageRank na seleção MMR")
+    parser.add_argument("--damping", type=float, default=0.85, help="Damping do PageRank")
+    parser.add_argument("--pagerank-max-iter", type=int, default=100, help="Máximo de iterações do PageRank")
+    parser.add_argument("--pagerank-tol", type=float, default=1e-6, help="Tolerância de convergência do PageRank")
     parser.add_argument("--demo",     action="store_true",           help="Roda demo completa")
     parser.add_argument("--verbose",  action="store_true",           help="Mostra frases ranqueadas")
     parser.add_argument("--json",     action="store_true",           help="Saída em JSON")
@@ -130,10 +145,21 @@ def main():
         lang=args.lang,
         similarity_method=args.metodo,
         similarity_threshold=args.threshold,
-        damping=0.85,
+        damping=args.damping,
+        pagerank_max_iter=args.pagerank_max_iter,
+        pagerank_tol=args.pagerank_tol,
     )
 
-    result = summarizer.summarize(text, n_sentences=args.frases)
+    result = summarizer.summarize(
+        text,
+        n_sentences=args.frases,
+        summary_percent=args.percentual_resumo,
+        threshold_strategy=args.threshold_strategy,
+        target_density=args.target_density,
+        selection_strategy=args.selection_strategy,
+        diversity_alpha=args.alpha,
+        include_graph=args.viz,
+    )
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
