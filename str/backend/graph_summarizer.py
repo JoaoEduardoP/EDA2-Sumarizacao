@@ -22,7 +22,7 @@ import time
 import heapq
 import math
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx  # usado APENAS para visualização do grafo
 
@@ -60,6 +60,77 @@ def cosine_tfidf_similarity(
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def compute_summary_sentence_count(
+    total_sentences: int,
+    n_sentences: Optional[int] = None,
+    summary_percent: Optional[float] = None,
+) -> int:
+    if total_sentences <= 0:
+        return 0
+    if summary_percent is not None:
+        desired = math.ceil(total_sentences * _clamp(float(summary_percent), 0.0, 100.0) / 100)
+    else:
+        desired = n_sentences if n_sentences is not None else 5
+    return max(1, min(int(desired), total_sentences))
+
+
+def compute_adaptive_threshold(
+    similarities: List[float],
+    method: str,
+    base_threshold: float = 0.1,
+    strategy: str = "auto_density",
+    target_density: float = 0.12,
+) -> Dict[str, Any]:
+    total_pairs = len(similarities)
+    positive = [s for s in similarities if s > 0]
+    mean_sim = sum(similarities) / total_pairs if total_pairs else 0.0
+    variance = sum((s - mean_sim) ** 2 for s in similarities) / total_pairs if total_pairs else 0.0
+    std_sim = variance ** 0.5
+
+    aliases = {"fixed": "manual", "fixo": "manual", "density": "auto_density", "densidade": "auto_density", "auto": "mean_std", "mean": "mean_std", "mean+std": "mean_std"}
+    normalized_strategy = aliases.get((strategy or "auto_density").lower(), (strategy or "auto_density").lower())
+    threshold = base_threshold
+    desired_edges = 0
+
+    if normalized_strategy == "manual":
+        automatic = False
+    elif normalized_strategy == "mean_std":
+        min_t, max_t, k = {"embeddings": (0.20, 0.85, 0.50), "tfidf": (0.05, 0.75, 0.50)}.get(method, (0.05, 0.50, 0.30))
+        source = positive or similarities
+        if source:
+            local_mean = sum(source) / len(source)
+            local_variance = sum((s - local_mean) ** 2 for s in source) / len(source)
+            threshold = _clamp(local_mean + k * (local_variance ** 0.5), min_t, max_t)
+        automatic = True
+    elif normalized_strategy == "auto_density":
+        target_density = _clamp(float(target_density), 0.01, 1.0)
+        desired_edges = math.ceil(total_pairs * target_density) if total_pairs else 0
+        if similarities and desired_edges > 0:
+            sorted_sims = sorted(similarities, reverse=True)
+            cutoff_index = min(desired_edges, len(sorted_sims)) - 1
+            threshold = sorted_sims[cutoff_index]
+        automatic = True
+    else:
+        normalized_strategy = "manual"
+        automatic = False
+
+    return {
+        "threshold": float(threshold),
+        "strategy": normalized_strategy,
+        "automatico": automatic,
+        "target_density": round(float(target_density), 4),
+        "desired_edges": desired_edges,
+        "total_pairs": total_pairs,
+        "positive_pairs": len(positive),
+        "mean_similarity": round(mean_sim, 6),
+        "std_similarity": round(std_sim, 6),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -158,13 +229,46 @@ class SentenceGraph:
                     G.add_edge(i, j, weight=w)
         return G
 
+    def edge_list(self) -> List[Dict[str, float]]:
+        return [
+            {"origem": i, "destino": j, "peso": round(w, 6)}
+            for i, neighbors in self.adj.items()
+            for j, w in neighbors.items()
+            if i < j
+        ]
+
+    def _component_sizes(self) -> List[int]:
+        visited: Set[int] = set()
+        sizes: List[int] = []
+        for start in range(self.n):
+            if start in visited:
+                continue
+            stack = [start]
+            visited.add(start)
+            size = 0
+            while stack:
+                node = stack.pop()
+                size += 1
+                for neighbor in self.adj[node]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+            sizes.append(size)
+        return sizes
+
     def stats(self) -> Dict:
         degrees = {i: len(v) for i, v in self.adj.items()}
+        component_sizes = self._component_sizes()
+        density = 2 * self.n_edges / (self.n * (self.n - 1)) if self.n > 1 else 0.0
         return {
             "vertices": self.n,
             "arestas": self.n_edges,
             "grau_medio": sum(degrees.values()) / max(self.n, 1),
             "grau_max": max(degrees.values()) if degrees else 0,
+            "densidade": round(density, 6),
+            "nos_isolados": sum(1 for degree in degrees.values() if degree == 0),
+            "componentes_conectados": len(component_sizes),
+            "maior_componente": max(component_sizes) if component_sizes else 0,
         }
 
 
@@ -176,8 +280,9 @@ def pagerank(
     graph: SentenceGraph,
     damping: float = 0.85,
     max_iter: int = 100,
-    tol: float = 1e-6
-) -> Dict[int, float]:
+    tol: float = 1e-6,
+    return_metadata: bool = False,
+):
     """
     PageRank adaptado para grafos de frases (TextRank).
 
@@ -201,7 +306,18 @@ def pagerank(
     """
     n = graph.n
     if n == 0:
-        return {}
+        scores: Dict[int, float] = {}
+        metadata = {
+            "convergiu": True,
+            "iteracoes": 0,
+            "delta_final": 0.0,
+            "soma_scores": 0.0,
+            "damping": damping,
+            "max_iter": max_iter,
+            "tol": tol,
+            "dangling_nodes": 0,
+        }
+        return (scores, metadata) if return_metadata else scores
 
     # Inicializa scores uniformemente
     scores: Dict[int, float] = {i: 1.0 / n for i in range(n)}
@@ -210,6 +326,9 @@ def pagerank(
     # não muda entre iterações, então essa lista é calculada uma única vez
     # fora do loop principal.
     dangling_nodes = [i for i in range(n) if graph.out_weight_sum(i) == 0]
+    iterations_run = 0
+    final_delta = 0.0
+    converged = False
 
     for iteration in range(max_iter):
         new_scores: Dict[int, float] = {}
@@ -236,14 +355,28 @@ def pagerank(
         # Checa convergência (norma L1)
         delta = sum(abs(new_scores[i] - scores[i]) for i in range(n))
         scores = new_scores
+        iterations_run = iteration + 1
+        final_delta = delta
 
         if delta < tol:
+            converged = True
             print(f"  PageRank convergiu em {iteration + 1} iterações (δ={delta:.2e})")
             break
     else:
         print(f"  PageRank atingiu máximo de {max_iter} iterações")
 
-    return scores
+    metadata = {
+        "convergiu": converged,
+        "iteracoes": iterations_run,
+        "delta_final": round(final_delta, 12),
+        "soma_scores": round(sum(scores.values()), 12),
+        "damping": damping,
+        "max_iter": max_iter,
+        "tol": tol,
+        "dangling_nodes": len(dangling_nodes),
+    }
+
+    return (scores, metadata) if return_metadata else scores
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -344,6 +477,37 @@ def remove_redundant(
     return selected, removed_count
 
 
+def select_sentences_mmr(
+    candidates: List[Tuple[float, int, str]],
+    token_sets: List[Set[str]],
+    n_sentences: int,
+    diversity_alpha: float = 0.85,
+) -> List[Tuple[float, int, str]]:
+    if n_sentences <= 0 or not candidates:
+        return []
+    alpha = _clamp(float(diversity_alpha), 0.0, 1.0)
+    max_score = max(score for score, _, _ in candidates) or 1.0
+    remaining = {idx: (score, idx, sentence) for score, idx, sentence in candidates}
+    selected: List[Tuple[float, int, str]] = []
+    selected_idx: List[int] = []
+    while remaining and len(selected) < n_sentences:
+        best_item: Optional[Tuple[float, int, str]] = None
+        best_mmr = float("-inf")
+        for score, idx, sentence in remaining.values():
+            importance = score / max_score
+            redundancy = max((jaccard_similarity(token_sets[idx], token_sets[s]) for s in selected_idx), default=0.0)
+            mmr_score = alpha * importance - (1 - alpha) * redundancy
+            if mmr_score > best_mmr or (math.isclose(mmr_score, best_mmr) and best_item and score > best_item[0]):
+                best_mmr = mmr_score
+                best_item = (score, idx, sentence)
+        if best_item is None:
+            break
+        selected.append(best_item)
+        selected_idx.append(best_item[1])
+        del remaining[best_item[1]]
+    return selected
+
+
 # ═══════════════════════════════════════════════════════════════
 # SUMARIZADOR PRINCIPAL
 # ═══════════════════════════════════════════════════════════════
@@ -364,11 +528,15 @@ class WikiSummarizer:
         similarity_threshold: float = 0.1,
         damping: float = 0.85,
         redundancy_threshold: float = 0.75,
+        pagerank_max_iter: int = 100,
+        pagerank_tol: float = 1e-6,
     ):
         self.preprocessor = TextPreprocessor(lang)
         self.similarity_method = similarity_method
         self.threshold = similarity_threshold
         self.damping = damping
+        self.pagerank_max_iter = pagerank_max_iter
+        self.pagerank_tol = pagerank_tol
         # Acima desse valor de Jaccard entre duas frases, a segunda é
         # considerada redundante e não entra no resumo (ver remove_redundant).
         self.redundancy_threshold = redundancy_threshold
@@ -389,21 +557,31 @@ class WikiSummarizer:
         text: str, 
         n_sentences: int = 5, 
         preserve_order: bool = True, 
-        auto_threshold: bool = True
+        auto_threshold: bool = True,
+        summary_percent: Optional[float] = None,
+        threshold_strategy: Optional[str] = None,
+        target_density: float = 0.12,
+        selection_strategy: str = "mmr",
+        diversity_alpha: float = 0.85,
+        include_graph: bool = False,
     ) -> Dict:
         """
         Sumariza o texto e retorna dict com resumo + metadados do grafo.
         
         Args:
             text:            Texto original (artigo Wikipedia)
-            n_sentences:     Número de frases no resumo
+            n_sentences:     Número de frases no resumo (ignorado se summary_percent for informado)
             preserve_order:  Manter ordem original das frases no resumo
-            auto_threshold:  Calcular threshold automaticamente baseado na similaridade média
+            auto_threshold:  Compatibilidade: usa threshold automático se threshold_strategy não for informada
+            summary_percent: Porcentagem do texto original a manter no resumo
+            threshold_strategy: manual | mean_std | auto_density
+            target_density: Fração aproximada dos pares que viram arestas em auto_density
+            selection_strategy: mmr | redundancy
+            diversity_alpha: Peso do PageRank no MMR
 
         Returns:
             Dict com: resumo, frases selecionadas, scores, stats do grafo, performance
         """
-        import time
         start_time = time.time()
         
         print("\n" + "═" * 60)
@@ -421,7 +599,11 @@ class WikiSummarizer:
         if total == 0:
             return {"erro": "Nenhuma frase encontrada no texto."}
 
-        n_sentences = min(n_sentences, total)
+        n_sentences = compute_summary_sentence_count(
+            total,
+            n_sentences=n_sentences,
+            summary_percent=summary_percent,
+        )
 
         # ═══════════════════════════════════════════════════════════════
         # PASSO 2: Tokenização e hash tables
@@ -442,116 +624,73 @@ class WikiSummarizer:
         print(f"      ✓ Média de tokens por frase: {avg_tokens_per_sentence:.1f}")
 
         # ═══════════════════════════════════════════════════════════════
-        # PASSO 3: Threshold adaptativo (se solicitado)
+        # PASSO 3: Similaridades + threshold adaptativo
         # ═══════════════════════════════════════════════════════════════
         original_threshold = self.threshold
+        normalized_threshold_strategy = (
+            threshold_strategy
+            if threshold_strategy is not None
+            else ("auto_density" if auto_threshold else "manual")
+        )
 
-        # ── Embeddings: geração antecipada (necessária antes do threshold) ──
-        sim_matrix = None
+        print("[3/6] Calculando similaridades e threshold...")
+        similarity_pairs: List[Tuple[int, int, float]] = []
+
         if self.similarity_method == "embeddings":
-            print("[3/6] Gerando embeddings semânticos...")
+            print("      → Gerando embeddings semânticos...")
             from embedder import get_embeddings, cosine_similarity_matrix
             embeddings = get_embeddings(sentences)
             sim_matrix = cosine_similarity_matrix(embeddings)
             print(f"      ✓ Embeddings gerados: {embeddings.shape}")
 
-            if auto_threshold and total > 5:
-                # Threshold adaptativo para coseno: média + 0.5 * desvio
-                # (coseno tem escala diferente do Jaccard: [0, 1] com média ~0.4)
-                import numpy as _np
-                upper = sim_matrix[_np.triu_indices(total, k=1)]
-                mean_sim = float(_np.mean(upper))
-                std_sim = float(_np.std(upper))
-                auto_threshold_value = mean_sim + 0.5 * std_sim
-                auto_threshold_value = max(0.2, min(0.85, auto_threshold_value))
-                print(f"      ✓ Média das similaridades: {mean_sim:.4f}")
-                print(f"      ✓ Desvio padrão: {std_sim:.4f}")
-                print(f"      ✓ Threshold original: {self.threshold}")
-                print(f"      ✓ Threshold automático: {auto_threshold_value:.4f}")
-                self.threshold = auto_threshold_value
-            else:
-                print(f"      ✓ Threshold fixo: {self.threshold}")
-
-        elif auto_threshold and self.similarity_method == "jaccard" and total > 5:
-            print("[3/6] Calculando threshold adaptativo...")
-
-            sample_sims = []
-            sample_limit = min(50, total)
-            for i in range(sample_limit):
-                for j in range(i + 1, sample_limit):
-                    sim = jaccard_similarity(token_sets[i], token_sets[j])
-                    if sim > 0:
-                        sample_sims.append(sim)
-
-            if sample_sims:
-                mean_sim = sum(sample_sims) / len(sample_sims)
-                variance = sum((s - mean_sim) ** 2 for s in sample_sims) / len(sample_sims)
-                std_sim = variance ** 0.5
-                auto_threshold_value = mean_sim + 0.3 * std_sim
-                auto_threshold_value = max(0.05, min(0.5, auto_threshold_value))
-                print(f"      ✓ Média das similaridades: {mean_sim:.4f}")
-                print(f"      ✓ Desvio padrão: {std_sim:.4f}")
-                print(f"      ✓ Threshold original: {self.threshold}")
-                print(f"      ✓ Threshold automático: {auto_threshold_value:.4f}")
-                self.threshold = auto_threshold_value
-            else:
-                print(f"      ⚠ Sem amostras válidas, mantendo threshold: {self.threshold}")
-        else:
-            print(f"[3/6] Pulando threshold adaptativo (auto_threshold={auto_threshold}, metodo={self.similarity_method})")
-
-        # ═══════════════════════════════════════════════════════════════
-        # PASSO 4: Construção do grafo
-        # ═══════════════════════════════════════════════════════════════
-        print("[4/6] Calculando similaridade e construindo grafo...")
-        graph = SentenceGraph(total)
-        similarity_comparisons = 0
-        edges_added = 0
-
-        if self.similarity_method == "embeddings":
-            # sim_matrix já calculada no passo 3
-            # Garantia: se por algum motivo sim_matrix for None, tenta recomputar.
-            if sim_matrix is None:
-                try:
-                    from embedder import get_embeddings, cosine_similarity_matrix
-                    import numpy as _np
-                    embeddings = get_embeddings(sentences)
-                    sim_matrix = cosine_similarity_matrix(embeddings)
-                    print("      ✓ Matriz de similaridade recomposta com sucesso")
-                except Exception as e:
-                    print(f"      ⚠ Não foi possível recomputar sim_matrix: {e}")
-                    # fallback: matriz zero (nenhuma similaridade)
-                    import numpy as _np
-                    sim_matrix = _np.zeros((total, total))
-
             for i in range(total):
                 for j in range(i + 1, total):
-                    similarity_comparisons += 1
-                    sim = float(sim_matrix[i, j])
-                    if sim >= self.threshold:
-                        graph.add_edge(i, j, sim)
-                        edges_added += 1
+                    similarity_pairs.append((i, j, float(sim_matrix[i, j])))
         elif self.similarity_method == "tfidf":
             tfidf_vecs = compute_tfidf(sentences, self.preprocessor)
             for i in range(total):
                 for j in range(i + 1, total):
-                    similarity_comparisons += 1
                     sim = cosine_tfidf_similarity(tfidf_vecs[i], tfidf_vecs[j])
-                    if sim >= self.threshold:
-                        graph.add_edge(i, j, sim)
-                        edges_added += 1
-        else:  # jaccard
+                    similarity_pairs.append((i, j, sim))
+        else:
             for i in range(total):
                 for j in range(i + 1, total):
-                    similarity_comparisons += 1
                     sim = jaccard_similarity(token_sets[i], token_sets[j])
-                    if sim >= self.threshold:
-                        graph.add_edge(i, j, sim)
-                        edges_added += 1
+                    similarity_pairs.append((i, j, sim))
+
+        threshold_info = compute_adaptive_threshold(
+            [sim for _, _, sim in similarity_pairs],
+            method=self.similarity_method,
+            base_threshold=original_threshold,
+            strategy=normalized_threshold_strategy,
+            target_density=target_density,
+        )
+        self.threshold = threshold_info["threshold"]
+
+        print(f"      ✓ Comparações de similaridade: {len(similarity_pairs)}")
+        print(f"      ✓ Estratégia de threshold: {threshold_info['strategy']}")
+        print(f"      ✓ Média das similaridades: {threshold_info['mean_similarity']:.4f}")
+        print(f"      ✓ Desvio padrão: {threshold_info['std_similarity']:.4f}")
+        print(f"      ✓ Threshold original: {original_threshold}")
+        print(f"      ✓ Threshold usado: {self.threshold:.4f}")
+
+        # ═══════════════════════════════════════════════════════════════
+        # PASSO 4: Construção do grafo
+        # ═══════════════════════════════════════════════════════════════
+        print("[4/6] Construindo grafo...")
+        graph = SentenceGraph(total)
+        edges_added = 0
+
+        for i, j, sim in similarity_pairs:
+            if sim >= self.threshold:
+                before = graph.n_edges
+                graph.add_edge(i, j, sim)
+                if graph.n_edges > before:
+                    edges_added += 1
 
         stats = graph.stats()
-        print(f"      ✓ Comparações de similaridade: {similarity_comparisons}")
         print(f"      ✓ Arestas adicionadas: {edges_added}")
-        print(f"      ✓ Densidade do grafo: {2 * edges_added / (total * (total - 1)) if total > 1 else 0:.4f}")
+        print(f"      ✓ Densidade do grafo: {stats['densidade']:.4f}")
         print(f"      ✓ Grau médio: {stats['grau_medio']:.2f}")
         print(f"      ✓ Grau máximo: {stats['grau_max']}")
 
@@ -564,18 +703,29 @@ class WikiSummarizer:
         # PASSO 5: PageRank
         # ═══════════════════════════════════════════════════════════════
         print("[5/6] Executando PageRank...")
-        scores = pagerank(graph, damping=self.damping)
+        scores, pagerank_info = pagerank(
+            graph,
+            damping=self.damping,
+            max_iter=self.pagerank_max_iter,
+            tol=self.pagerank_tol,
+            return_metadata=True,
+        )
         self._last_scores = scores
         
         # Mostra top 3 scores para debug
         top_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
         print(f"      ✓ Top scores: {[(idx, round(score, 6)) for idx, score in top_scores]}")
+        print(
+            "      ✓ Convergência: "
+            f"{pagerank_info['convergiu']} | "
+            f"{pagerank_info['iteracoes']} iterações | "
+            f"delta={pagerank_info['delta_final']:.2e}"
+        )
 
         # ═══════════════════════════════════════════════════════════════
-        # PASSO 6: Seleção das frases com fila de prioridade + remoção
-        #          de redundância
+        # PASSO 6: Seleção das frases
         # ═══════════════════════════════════════════════════════════════
-        print("[6/6] Selecionando frases via fila de prioridade (max-heap)...")
+        print("[6/6] Selecionando frases...")
 
         # Pega um pool maior que n_sentences, pois a etapa de remoção de
         # redundância pode descartar algumas candidatas e precisamos de
@@ -584,15 +734,28 @@ class WikiSummarizer:
         candidates_pool = top_k_sentences(scores, sentences, pool_size)
 
         print(f"      ✓ Pool de candidatas: {pool_size} frases")
-        print("      → Aplicando remoção de redundância (Jaccard > "
-              f"{self.redundancy_threshold})...")
-        top, n_redundant_removed = remove_redundant(
-            candidates_pool,
-            token_sets,
-            n_sentences,
-            redundancy_threshold=self.redundancy_threshold,
-        )
-        print(f"      ✓ Frases redundantes descartadas: {n_redundant_removed}")
+        normalized_selection_strategy = (selection_strategy or "mmr").lower()
+        if normalized_selection_strategy in {"pagerank", "redundancy", "baseline"}:
+            normalized_selection_strategy = "redundancy"
+            print("      → Aplicando baseline PageRank + filtro de redundância "
+                  f"(Jaccard > {self.redundancy_threshold})...")
+            top, n_redundant_removed = remove_redundant(
+                candidates_pool,
+                token_sets,
+                n_sentences,
+                redundancy_threshold=self.redundancy_threshold,
+            )
+            print(f"      ✓ Frases redundantes descartadas: {n_redundant_removed}")
+        else:
+            normalized_selection_strategy = "mmr"
+            print(f"      → Aplicando MMR (alpha={diversity_alpha})...")
+            top = select_sentences_mmr(
+                candidates_pool,
+                token_sets,
+                n_sentences,
+                diversity_alpha=diversity_alpha,
+            )
+            n_redundant_removed = 0
 
         if preserve_order:
             # Reordena pelo índice original para manter coesão
@@ -616,7 +779,7 @@ class WikiSummarizer:
         # ═══════════════════════════════════════════════════════════════
         # RESULTADO
         # ═══════════════════════════════════════════════════════════════
-        return {
+        result = {
             "resumo": summary,
             "frases_selecionadas": [
                 {
@@ -630,23 +793,35 @@ class WikiSummarizer:
             "metadados": {
                 "total_frases": total,
                 "frases_no_resumo": n_sentences,
+                "summary_percent": summary_percent,
                 "metodo_similaridade": self.similarity_method,
                 "threshold_original": original_threshold,
                 "threshold_usado": self.threshold,
-                "threshold_automatico": auto_threshold,
+                "threshold_automatico": threshold_info["automatico"],
+                "threshold": threshold_info,
+                "selection_strategy": normalized_selection_strategy,
+                "diversity_alpha": round(float(diversity_alpha), 4),
                 "redundancy_threshold": self.redundancy_threshold,
                 "frases_redundantes_removidas": n_redundant_removed,
+                "pagerank": pagerank_info,
                 "grafo": stats,
                 "top_tokens": sorted(
                     global_freq.items(), key=lambda x: x[1], reverse=True
                 )[:15],
                 "performance": {
                     "tempo_segundos": round(elapsed_time, 2),
-                    "similaridades_calculadas": similarity_comparisons,
+                    "similaridades_calculadas": len(similarity_pairs),
                     "arestas_adicionadas": edges_added,
-                    "densidade_grafo": round(2 * edges_added / (total * (total - 1)), 6) if total > 1 else 0,
+                    "densidade_grafo": stats["densidade"],
                     "media_tokens_por_frase": round(avg_tokens_per_sentence, 2),
                     "tokens_unicos": unique_tokens,
                 }
             },
         }
+
+        if include_graph:
+            result["grafo_serializado"] = {
+                "arestas": graph.edge_list(),
+            }
+
+        return result

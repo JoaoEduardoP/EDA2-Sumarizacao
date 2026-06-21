@@ -50,6 +50,11 @@ NIVEIS = {
         "descricao": "Cobre os pontos principais com mais profundidade.",
         "icon": "🔬",
     },
+    "Personalizado (%)": {
+        "frases": None,
+        "descricao": "Define o tamanho do resumo como porcentagem do artigo.",
+        "icon": "🎚️",
+    },
 }
 
 ARTIGOS_EXEMPLO = {
@@ -99,55 +104,87 @@ def buscar_artigo(titulo: str, lang: str) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def sumarizar(texto: str, n_frases: int, lang: str, metodo: str) -> dict:
+def sumarizar(
+    texto: str,
+    n_frases: int | None,
+    summary_percent: float | None,
+    lang: str,
+    metodo: str,
+    threshold_manual: float,
+    threshold_strategy: str,
+    target_density: float,
+    damping: float,
+    pagerank_max_iter: int,
+    pagerank_tol: float,
+    selection_strategy: str,
+    diversity_alpha: float,
+    include_graph: bool,
+) -> dict:
     summarizer = WikiSummarizer(
         lang=lang,
         similarity_method=metodo,
-        similarity_threshold=0.1,
-        damping=0.85,
+        similarity_threshold=threshold_manual,
+        damping=damping,
+        pagerank_max_iter=pagerank_max_iter,
+        pagerank_tol=pagerank_tol,
     )
-    return summarizer.summarize(texto, n_sentences=n_frases, preserve_order=True, auto_threshold=True)
+    return summarizer.summarize(
+        texto,
+        n_sentences=n_frases or 5,
+        preserve_order=True,
+        auto_threshold=threshold_strategy != "manual",
+        summary_percent=summary_percent,
+        threshold_strategy=threshold_strategy,
+        target_density=target_density,
+        selection_strategy=selection_strategy,
+        diversity_alpha=diversity_alpha,
+        include_graph=include_graph,
+    )
 
 
 def gerar_imagem_grafo(result: dict, sentences: list) -> bytes:
     """Gera a imagem do grafo e retorna como bytes PNG."""
-    from backend.graph_summarizer import SentenceGraph, pagerank as _pr
-
-    # Reconstrói o grafo a partir dos metadados (já calculado)
-    # Usa o grafo armazenado em cache via summarizer — recria para visualização
     n = result["metadados"]["grafo"]["vertices"]
     scores = result.get("scores", {})
+    graph_data = result.get("grafo_serializado", {})
+    edges = graph_data.get("arestas", [])
 
     # Importa NetworkX só para visualização
     import networkx as nx
 
     G = nx.Graph()
     G.add_nodes_from(range(n))
+    for edge in edges:
+        G.add_edge(edge["origem"], edge["destino"], weight=edge["peso"])
 
-    # Usa os scores para colorir; sem arestas visíveis aqui (grafo real não re-exportado)
     fig, ax = plt.subplots(figsize=(10, 7))
 
     if n <= 1:
         ax.text(0.5, 0.5, "Grafo com apenas 1 vértice", ha="center", va="center")
     else:
-        pos = nx.spring_layout(G, seed=42)
-        node_colors = [scores.get(i, 0.0) for i in range(n)]
-        cmap = plt.get_cmap("Blues")
-        nx.draw_networkx_nodes(G, pos, node_color=node_colors, cmap=cmap,
-                               node_size=300, alpha=0.9, ax=ax)
-        nx.draw_networkx_edges(G, pos, edge_color="gray", alpha=0.4, width=0.5, ax=ax)
-
-        # Labels apenas das frases selecionadas
         selecionadas = {item["indice"] for item in result["frases_selecionadas"]}
-        labels = {
-            i: f"#{i}" if i not in selecionadas else f"★{i}"
-            for i in range(n)
-        }
-        nx.draw_networkx_labels(G, pos, labels, font_size=7, ax=ax)
+        pos = nx.spring_layout(G, seed=42, k=1.2, iterations=80)
+        widths = [0.5 + 4 * data["weight"] for _, _, data in G.edges(data=True)]
+        nx.draw_networkx_edges(G, pos, edge_color="#7f8c8d", alpha=0.35, width=widths, ax=ax)
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_color=[scores.get(i, 0.0) for i in range(n)],
+            cmap=plt.get_cmap("viridis"),
+            node_size=[560 if i in selecionadas else 280 for i in range(n)],
+            edgecolors=["#f39c12" if i in selecionadas else "#263238" for i in range(n)],
+            linewidths=[2.0 if i in selecionadas else 0.4 for i in range(n)],
+            alpha=0.9,
+            ax=ax,
+        )
+        label_nodes = set(range(n)) if n <= 20 else selecionadas
+        labels = {i: f"#{i}" if i not in selecionadas else f"★{i}" for i in label_nodes}
+        nx.draw_networkx_labels(G, pos, labels, font_size=8, font_weight="bold", ax=ax)
 
     ax.set_title(
         f"Grafo de Frases — {n} vértices | "
-        f"{result['metadados']['grafo']['arestas']} arestas",
+        f"{result['metadados']['grafo']['arestas']} arestas | "
+        f"densidade {result['metadados']['grafo']['densidade']:.3f}",
         fontsize=11,
     )
     ax.axis("off")
@@ -158,6 +195,20 @@ def gerar_imagem_grafo(result: dict, sentences: list) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
+
+def renderizar_resumo(titulo: str, resumo: str, meta: dict, lang: str):
+    """Renderiza o resumo com componentes nativos do Streamlit."""
+    st.markdown(f"#### {titulo or 'Artigo'}")
+    st.caption(
+        f"{meta.get('frases_no_resumo', '?')} de {meta.get('total_frases', '?')} frases | "
+        f"{meta.get('metodo_similaridade', '?').upper()} | {lang.upper()}"
+    )
+    st.info(resumo)
+
+
+def detail_row(label: str, value, tooltip: str):
+    st.markdown(f"**{label}:** `{value}`", help=tooltip)
 
 
 # ─────────────────────────────────────────────
@@ -199,6 +250,16 @@ with st.sidebar:
         index=1,
     )
     st.caption(NIVEIS[nivel_escolhido]["descricao"])
+    summary_percent = None
+    if nivel_escolhido == "Personalizado (%)":
+        summary_percent = st.slider(
+            "Porcentagem do artigo",
+            min_value=5,
+            max_value=50,
+            value=25,
+            step=5,
+            help="O backend calcula ceil(total de frases × porcentagem).",
+        )
 
     st.divider()
 
@@ -218,6 +279,77 @@ with st.sidebar:
         st.caption(
             "Usa o modelo `paraphrase-multilingual-MiniLM-L12-v2` (~120 MB). "
             "Baixado automaticamente na primeira execução."
+        )
+
+    with st.expander("Avançado"):
+        threshold_label = st.selectbox(
+            "Estratégia de threshold",
+            ["Densidade-alvo", "Média + desvio", "Manual"],
+            index=0,
+            help="Define como a similaridade mínima vira aresta: densidade-alvo, média+desvio ou valor manual.",
+        )
+        threshold_strategy = {"Densidade-alvo": "auto_density", "Média + desvio": "mean_std", "Manual": "manual"}[threshold_label]
+
+        target_density_percent = st.slider(
+            "Densidade-alvo do grafo (%)",
+            min_value=1,
+            max_value=40,
+            value=12,
+            step=1,
+            disabled=threshold_strategy != "auto_density",
+            help="Percentual aproximado de pares de frases mantidos como arestas.",
+        )
+        target_density = target_density_percent / 100
+
+        threshold_manual = st.slider(
+            "Threshold manual",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.10,
+            step=0.01,
+            disabled=threshold_strategy != "manual",
+            help="Similaridade mínima para criar uma aresta no modo Manual.",
+        )
+
+        damping = st.slider(
+            "Damping do PageRank",
+            min_value=0.50,
+            max_value=0.95,
+            value=0.85,
+            step=0.01,
+            help="Peso dado a seguir as conexões do grafo no PageRank.",
+        )
+        pagerank_max_iter = st.number_input(
+            "Máximo de iterações",
+            min_value=20,
+            max_value=500,
+            value=100,
+            step=10,
+            help="Limite de ciclos do PageRank antes de parar.",
+        )
+        pagerank_tol = st.selectbox(
+            "Tolerância de convergência",
+            [1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
+            index=2,
+            format_func=lambda v: f"{v:.0e}",
+            help="Diferença mínima entre iterações para considerar convergência.",
+        )
+
+        selection_label = st.selectbox(
+            "Estratégia de seleção",
+            ["MMR (diversidade)", "PageRank + filtro"],
+            index=0,
+            help="MMR favorece diversidade; PageRank + filtro usa o baseline com remoção de redundância.",
+        )
+        selection_strategy = {"MMR (diversidade)": "mmr", "PageRank + filtro": "redundancy"}[selection_label]
+        diversity_alpha = st.slider(
+            "Alpha do MMR",
+            min_value=0.50,
+            max_value=0.95,
+            value=0.85,
+            step=0.01,
+            disabled=selection_strategy != "mmr",
+            help="Peso do PageRank no MMR; menor alpha aumenta diversidade.",
         )
 
     st.divider()
@@ -345,7 +477,22 @@ if rodar and entrada_final.strip():
         else "Construindo grafo e executando PageRank..."
     )
     with st.spinner(spinner_msg):
-        result = sumarizar(texto, n_frases, lang_uso, metodo)
+        result = sumarizar(
+            texto,
+            n_frases,
+            summary_percent,
+            lang_uso,
+            metodo,
+            threshold_manual,
+            threshold_strategy,
+            target_density,
+            damping,
+            int(pagerank_max_iter),
+            pagerank_tol,
+            selection_strategy,
+            diversity_alpha,
+            mostrar_grafo,
+        )
 
     if "erro" in result:
         st.error(result["erro"])
@@ -370,13 +517,13 @@ if rodar and entrada_final.strip():
     # RESULTADO — RESUMO
     # ─────────────────────────────────────────────
     st.markdown("### Resumo gerado")
-    st.info(result["resumo"])
+    renderizar_resumo(titulo, result["resumo"], meta, lang_uso)
 
     # ─────────────────────────────────────────────
     # RESULTADO — FRASES RANQUEADAS
     # ─────────────────────────────────────────────
     if mostrar_frases:
-        st.markdown("### Frases selecionadas pelo PageRank")
+        st.markdown("### Frases selecionadas")
         for item in result["frases_selecionadas"]:
             score = item["score_pagerank"]
             idx = item["indice"]
@@ -400,7 +547,7 @@ if rodar and entrada_final.strip():
     # ─────────────────────────────────────────────
     if mostrar_grafo:
         st.markdown("### Visualização do grafo")
-        st.caption("Nós marcados com ★ foram selecionados para o resumo.")
+        st.caption("Arestas usam os pesos reais de similaridade; nós marcados com ★ foram selecionados.")
         sentences_all = []
         try:
             from backend.preprocessor import TextPreprocessor
@@ -416,20 +563,46 @@ if rodar and entrada_final.strip():
     # RESULTADO — DETALHES TÉCNICOS
     # ─────────────────────────────────────────────
     with st.expander("Detalhes técnicos do processamento"):
+        threshold_meta = meta.get("threshold", {})
+        pagerank_meta = meta.get("pagerank", {})
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown("**Grafo**")
-            st.write(f"- Método de similaridade: `{meta['metodo_similaridade'].upper()}`")
-            st.write(f"- Threshold usado: `{meta['threshold_usado']:.4f}`")
-            st.write(f"- Threshold automático: `{meta['threshold_automatico']}`")
-            st.write(f"- Grau médio: `{meta['grafo']['grau_medio']:.2f}`")
-            st.write(f"- Grau máximo: `{meta['grafo']['grau_max']}`")
+            for label, value, tip in [
+                ("Método de similaridade", meta["metodo_similaridade"].upper(), "Forma usada para calcular o peso entre duas frases."),
+                ("Estratégia de threshold", threshold_meta.get("strategy", "?"), "Regra usada para decidir o corte mínimo de similaridade."),
+                ("Threshold usado", f"{meta['threshold_usado']:.4f}", "Similaridade mínima exigida para conectar duas frases."),
+                ("Média das similaridades", threshold_meta.get("mean_similarity", "?"), "Média entre todos os pares de frases avaliados."),
+                ("Desvio das similaridades", threshold_meta.get("std_similarity", "?"), "Variação das similaridades em torno da média."),
+                ("Densidade do grafo", meta["grafo"].get("densidade", "?"), "Proporção de arestas existentes em relação ao máximo possível."),
+                ("Grau médio", f"{meta['grafo']['grau_medio']:.2f}", "Número médio de conexões por frase."),
+                ("Grau máximo", meta["grafo"]["grau_max"], "Maior número de conexões em uma frase."),
+                ("Nós isolados", meta["grafo"].get("nos_isolados", "?"), "Frases sem conexão com outras frases."),
+                ("Componentes conectados", meta["grafo"].get("componentes_conectados", "?"), "Quantidade de grupos separados no grafo."),
+            ]:
+                detail_row(label, value, tip)
         with col_b:
-            st.markdown("**Performance**")
-            st.write(f"- Tempo total: `{perf.get('tempo_segundos', '?')} s`")
-            st.write(f"- Similaridades calculadas: `{perf.get('similaridades_calculadas', '?')}`")
-            st.write(f"- Tokens únicos: `{perf.get('tokens_unicos', '?')}`")
-            st.write(f"- Densidade do grafo: `{perf.get('densidade_grafo', '?')}`")
+            st.markdown("**PageRank e seleção**")
+            for label, value, tip in [
+                ("Damping", pagerank_meta.get("damping", "?"), "Peso dado às arestas no PageRank."),
+                ("Iterações", pagerank_meta.get("iteracoes", "?"), "Ciclos executados até parar."),
+                ("Convergiu", pagerank_meta.get("convergiu", "?"), "Indica se atingiu a tolerância configurada."),
+                ("Delta final", pagerank_meta.get("delta_final", "?"), "Variação dos scores na última iteração."),
+                ("Soma dos scores", pagerank_meta.get("soma_scores", "?"), "Soma final dos scores PageRank."),
+                ("Estratégia de seleção", meta.get("selection_strategy", "?"), "Método usado para escolher as frases finais."),
+                ("Alpha MMR", meta.get("diversity_alpha", "?"), "Peso do PageRank na seleção MMR."),
+                ("Frases redundantes removidas", meta.get("frases_redundantes_removidas", "?"), "Candidatas descartadas por redundância."),
+            ]:
+                detail_row(label, value, tip)
+
+        st.markdown("**Performance**")
+        col_c, col_d = st.columns(2)
+        with col_c:
+            detail_row("Tempo total", f"{perf.get('tempo_segundos', '?')} s", "Tempo total de processamento.")
+            detail_row("Similaridades calculadas", perf.get("similaridades_calculadas", "?"), "Pares de frases comparados.")
+        with col_d:
+            detail_row("Tokens únicos", perf.get("tokens_unicos", "?"), "Termos distintos após pré-processamento.")
+            detail_row("Média de tokens por frase", perf.get("media_tokens_por_frase", "?"), "Média de termos úteis por frase.")
 
 elif rodar and not entrada_final.strip():
     st.warning("Digite uma URL ou título de artigo.")
